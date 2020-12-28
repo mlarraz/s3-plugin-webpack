@@ -45,7 +45,8 @@ var config = {
 
   externals: NODE_ENV === 'test' ? [] : [
     'cdnizer',
-    'aws-sdk',
+    '@aws-sdk/client-cloudfront',
+    '@aws-sdk/client-s3',
     'lodash',
     's3',
     'recursive-readdir',

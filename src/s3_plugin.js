@@ -6,7 +6,8 @@ import ProgressBar from 'progress'
 import cdnizer from 'cdnizer'
 import _ from 'lodash'
 import mime from 'mime/lite'
-import {S3, CloudFront} from 'aws-sdk'
+import {S3} from '@aws-sdk/client-s3'
+import {CloudFront} from '@aws-sdk/client-cloudfront'
 
 import packageJson from '../package.json'
 
