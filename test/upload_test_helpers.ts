@@ -1,7 +1,7 @@
 import _ from 'lodash'
 import https from 'https'
 import path from 'path'
-import webpack from 'webpack'
+import webpack, {Compilation, Configuration, Stats} from 'webpack'
 import fs from 'fs'
 import {S3} from 'aws-sdk'
 import HtmlWebpackPlugin from 'html-webpack-plugin'
@@ -17,15 +17,15 @@ const OUTPUT_FILE_NAME = 's3Test'
 const OUTPUT_PATH = path.resolve(__dirname, '.tmp')
 const ENTRY_PATH = path.resolve(__dirname, 'fixtures/index.js')
 
-const createBuildFailError = (errors) => [
+const createBuildFailError = (errors: Error[]) => [
   'Webpack Build Failed',
   ...errors.map(e => e.stack),
 ].join('\n')
 
-var deleteFolderRecursive = function(path) {
+const deleteFolderRecursive = (path: string) => {
   if (fs.existsSync(path)) {
-    fs.readdirSync(path).forEach(function(file) {
-      var curPath = `${path}/${file}`
+    fs.readdirSync(path).forEach((file) => {
+      const curPath = `${path}/${file}`
 
       if (fs.lstatSync(curPath).isDirectory()) {
         // recurse
@@ -40,15 +40,12 @@ var deleteFolderRecursive = function(path) {
   }
 }
 
-var generateS3Config = function(config) {
-  var params = _.merge(
-    {},
-    {
-      s3Options: s3Opts.s3Options,
-      s3UploadOptions: s3Opts.s3UploadOptions,
-    },
-    config
-  )
+const generateS3Config = (config: Partial<ConstructorParameters<typeof S3WebpackPlugin>>) => {
+  const params: ConstructorParameters<typeof S3WebpackPlugin> = {
+    s3Options: s3Opts.s3Options,
+    s3UploadOptions: s3Opts.s3UploadOptions,
+    ...config
+  }
 
   return new S3WebpackPlugin(params)
 }
@@ -59,10 +56,10 @@ export default {
   S3_URL,
   S3_ERROR_REGEX,
 
-  fetch(url) {
-    return new Promise(function(resolve, reject) {
-      https.get(url, function(response) {
-        var body = ''
+  fetch(url: string) {
+    return new Promise((resolve, reject) => {
+      https.get(url, (response) => {
+        let body = ''
 
         response.on('data', (data) => (body += data))
         response.on('end', () => resolve(body))
@@ -71,23 +68,23 @@ export default {
     })
   },
 
-  addSlashToPath(pathName) {
+  addSlashToPath(pathName: string) {
     return pathName.endsWith(path.sep) ? pathName : pathName + path.sep
   },
 
-  createFolder(pathToFolder) {
+  createFolder(pathToFolder: string) {
     spawnSync('mkdir', ['-p', pathToFolder], {stdio: 'inherit'})
   },
 
-  testForFailFromStatsOrGetS3Files({errors, stats}) {
+  testForFailFromStatsOrGetS3Files({errors, stats}: Compilation) {
     if (errors) return assert.fail([], errors, createBuildFailError(errors))
 
     return this.getBuildFilesFromS3(this.getFilesFromStats(stats))
   },
 
-  testForFailFromDirectoryOrGetS3Files(directory) {
+  testForFailFromDirectoryOrGetS3Files(directory: string) {
     return ({errors}) => {
-      var basePath = this.addSlashToPath(`${directory}`)
+      let basePath = this.addSlashToPath(`${directory}`)
 
       if (errors) return assert.fail([], errors, createBuildFailError(errors))
       else
@@ -105,8 +102,8 @@ export default {
     if (!fs.existsSync(OUTPUT_PATH)) fs.mkdirSync(OUTPUT_PATH)
   },
 
-  createRandomFile(newPath) {
-    var hash = Math.random() * 10000,
+  createRandomFile(newPath: string) {
+    let hash = Math.random() * 10000,
         fileName = `random-file-${hash}`,
         newFileName = `${newPath}/${fileName}`
 
@@ -116,7 +113,7 @@ export default {
     return {fullPath: newFileName, fileName}
   },
 
-  createWebpackConfig({config, s3Config} = {}) {
+  createWebpackConfig({config, s3Config} = {}): Configuration {
     return _.extend(
       {
         entry: ENTRY_PATH,
@@ -175,34 +172,35 @@ export default {
     })
   },
 
-  getFilesFromDirectory(directory, basePath) {
-    var res = function readDirectory(dir) {
-      return fs.readdirSync(dir).reduce(function(res, file) {
-        var fPath = path.resolve(dir, file)
+  getFilesFromDirectory(directory: string, basePath: string) {
+    const readDirectory = (dir: string) => fs.readdirSync(dir).reduce<string[]>((res, file) => {
+      let fPath = path.resolve(dir, file)
 
-        if (fs.lstatSync(fPath).isDirectory())
-          res.push(...readDirectory(fPath))
-        else res.push(fPath)
+      if (fs.lstatSync(fPath).isDirectory())
+        res.push(...readDirectory(fPath))
+      else res.push(fPath)
 
-        return res
-      }, [])
-    }.call(this, directory)
+      return res
+    }, [])
+
+
+    const res = readDirectory(directory)
 
     return res.map((file) => file.replace(basePath, ''))
   },
 
-  getFilesFromStats(stats) {
+  getFilesFromStats(stats: Stats) {
     return _.map(stats.toJson().assets, 'name')
   },
 
-  getBuildFilesFromS3(files) {
-    var fetchFiles = files.filter((file) => !/.*\.html$/.test(file))
+  getBuildFilesFromS3(files: string[]) {
+    let fetchFiles = files.filter((file) => !/.*\.html$/.test(file))
 
     return Promise.all(
       fetchFiles.map((file) => this.fetch(S3_URL + file))
     ).then((nFiles) =>
       nFiles.map((file, i) => {
-        var fetchFile = fetchFiles[i]
+        let fetchFile = fetchFiles[i]
 
         return {
           name: fetchFile,
@@ -214,18 +212,18 @@ export default {
     )
   },
 
-  readFileFromOutputDir(file) {
+  readFileFromOutputDir(file: string) {
     return fs.readFileSync(path.resolve(OUTPUT_PATH, file)).toString()
   },
 
-  testForErrorsOrGetFileNames({stats, errors}) {
+  testForErrorsOrGetFileNames({stats, errors}: Configuration) {
     if (errors) return assert.fail([], errors, createBuildFailError(errors))
 
     return this.getFilesFromStats(stats)
   },
 
   assertFileMatches(files) {
-    var errors = _(files)
+    let errors = _(files)
       .map(({expected, actual, name, s3Url}) => {
         return assert.equal(
           actual,
@@ -243,17 +241,17 @@ export default {
     return s3Opts.cloudfrontInvalidateOptions
   },
 
-  getS3Object(key) {
+  getS3Object(key: string) {
     const s3 = new S3({
       accessKeyId: s3Opts.AWS_ACCESS_KEY,
       secretAccessKey: s3Opts.AWS_SECRET_ACCESS_KEY,
     })
 
     return new Promise((resolve, reject) => {
-      s3.getObject({Bucket: s3Opts.AWS_BUCKET, Key: key}, function(
+      s3.getObject({Bucket: s3Opts.AWS_BUCKET, Key: key}, (
         err,
         data
-      ) {
+      ) => {
         if (!err) {
           resolve(data)
         } else {

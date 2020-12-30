@@ -9,7 +9,7 @@ const CONTEXT = path.resolve(__dirname),
 
 var config = {
   context: CONTEXT,
-  entry: './src/s3_plugin.js',
+  entry: './src/s3_plugin.ts',
   target: 'node',
 
   output: {
@@ -35,7 +35,7 @@ var config = {
         exclude: [NODE_MODULES]
       },
       {
-        test: /\.js/,
+        test: /\.(j|t)s/,
         loader: 'babel-loader',
         include: [SRC_PATH, createPath('test')],
         exclude: [NODE_MODULES]

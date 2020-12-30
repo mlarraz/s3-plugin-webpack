@@ -91,3 +91,5 @@ test/.tmp
 
 s3-plugin-webpack.iml
 dist/
+
+tsconfig.tsbuildinfo

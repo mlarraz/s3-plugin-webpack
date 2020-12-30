@@ -8,6 +8,8 @@ import _ from 'lodash'
 import mime from 'mime/lite'
 import {S3, CloudFront} from 'aws-sdk'
 
+import type {Compilation, Compiler} from 'webpack'
+
 import packageJson from '../package.json'
 
 import {
@@ -20,17 +22,66 @@ import {
   REQUIRED_S3_UP_OPTS,
   PATH_SEP,
   DEFAULT_TRANSFORM,
+  File,
+  Rule,
 } from './helpers'
 
 http.globalAgent.maxSockets = https.globalAgent.maxSockets = 50
 
-const compileError = (compilation, error) => {
+const compileError = (compilation: Compilation, error: string) => {
   compilation.errors.push(new Error(error))
 }
 
-module.exports = class S3Plugin {
-  constructor(options = {}) {
-    var {
+interface CloudfrontInvalidateOptions {
+  DistributionId: string | string[]
+  Items: CloudFront.PathList
+}
+
+interface PluginOptions {
+  directory?: string
+  include?: Rule
+  exclude?: Rule
+  basePath: string
+  priority?: RegExp[]
+  htmlFiles?: string[]
+  progress: boolean
+}
+
+type UploadOptions = S3.PutObjectRequest & Partial<Pick<S3.PutObjectRequest, 'Key' | 'Body'>>
+
+export interface ConstructorOptions {
+  include?: Rule
+  exclude?: Rule
+  progress?: boolean
+  basePath?: string
+  directory?: string
+  htmlFiles?: string[]
+  basePathTransform(item: string): Promise<string>
+  s3Options: S3.ClientConfiguration
+  cdnizerOptions: Record<string, unknown>
+  s3UploadOptions: UploadOptions
+  cloudfrontInvalidateOptions?: CloudfrontInvalidateOptions
+  priority?: RegExp[]
+}
+
+class S3Plugin {
+  isConnected = false
+  urlMappings = []
+  uploadTotal = 0
+  uploadProgress = 0
+
+  uploadOptions: UploadOptions
+  cloudfrontInvalidateOptions?: CloudfrontInvalidateOptions
+  basePathTransform: (item: string) => Promise<string>
+  options: PluginOptions
+  s3Options: S3.ClientConfiguration
+  noCdnizer: boolean
+  cdnizerOptions: any
+  cdnizer: any
+  client?: S3
+
+  constructor(options: ConstructorOptions) {
+    let {
       include,
       exclude,
       progress,
@@ -40,18 +91,14 @@ module.exports = class S3Plugin {
       basePathTransform = DEFAULT_TRANSFORM,
       s3Options = {},
       cdnizerOptions = {},
-      s3UploadOptions = {},
-      cloudfrontInvalidateOptions = {},
+      s3UploadOptions,
+      cloudfrontInvalidateOptions,
       priority,
     } = options
 
     this.uploadOptions = s3UploadOptions
     this.cloudfrontInvalidateOptions = cloudfrontInvalidateOptions
-    this.isConnected = false
     this.cdnizerOptions = cdnizerOptions
-    this.urlMappings = []
-    this.uploadTotal = 0
-    this.uploadProgress = 0
     this.basePathTransform = basePathTransform
     basePath = basePath ? addTrailingS3Sep(basePath) : ''
 
@@ -65,10 +112,7 @@ module.exports = class S3Plugin {
       progress: _.isBoolean(progress) ? progress : true,
     }
 
-    this.clientConfig = {
-      s3Options,
-      maxAsyncS3: 50,
-    }
+    this.s3Options = s3Options
 
     this.noCdnizer = !Object.keys(this.cdnizerOptions).length
 
@@ -76,7 +120,7 @@ module.exports = class S3Plugin {
       this.cdnizerOptions.files = []
   }
 
-  apply(compiler) {
+  apply(compiler: Compiler) {
     this.connect()
 
     const isDirectoryUpload = !!this.options.directory,
@@ -94,24 +138,27 @@ module.exports = class S3Plugin {
 
     compiler.hooks.done.tapPromise(
       packageJson.name,
-      async({compilation}) => {
-        let error
+      async({compilation}): Promise<void> => {
+        let error: string
 
-        if (!hasRequiredUploadOpts)
+        if (!hasRequiredUploadOpts) {
           error = `S3Plugin-RequiredS3UploadOpts: ${REQUIRED_S3_UP_OPTS.join(
             ', '
           )}`
 
-        if (error) return compileError(compilation, error)
+          compileError(compilation, error)
+
+          return
+        }
 
         if (isDirectoryUpload) {
           const dPath = addSeperatorToPath(this.options.directory)
 
-          return this.getAllFilesRecursive(dPath)
+          this.getAllFilesRecursive(dPath)
             .then((files) => this.handleFiles(files))
             .catch((e) => this.handleErrors(e, compilation))
         } else {
-          return this.getAssetFiles(compilation)
+          this.getAssetFiles(compilation)
             .then((files) => this.handleFiles(files))
             .catch((e) => this.handleErrors(e, compilation))
         }
@@ -119,23 +166,23 @@ module.exports = class S3Plugin {
     )
   }
 
-  handleFiles(files) {
+  handleFiles(files: File[]) {
     return this.changeUrls(files)
       .then((files) => this.filterAllowedFiles(files))
       .then((files) => this.uploadFiles(files))
       .then(() => this.invalidateCloudfront())
   }
 
-  async handleErrors(error, compilation) {
+  async handleErrors(error: Error | string, compilation: Compilation) {
     compileError(compilation, `S3Plugin: ${error}`)
     throw error
   }
 
-  getAllFilesRecursive(fPath) {
+  getAllFilesRecursive(fPath: string) {
     return getDirectoryFilesRecursive(fPath)
   }
 
-  addPathToFiles(files, fPath) {
+  addPathToFiles(files: string[], fPath: string): File[] {
     return files.map((file) => ({
       name: file,
       path: path.resolve(fPath, file),
@@ -148,8 +195,8 @@ module.exports = class S3Plugin {
     else return file
   }
 
-  getAssetFiles({assets, outputOptions}) {
-    const files = _.map(assets, (value, name) => ({
+  getAssetFiles({assets, outputOptions}: Compilation) {
+    const files: File[] = _.map(assets, (value, name) => ({
       name,
       path: `${outputOptions.path}/${name}`,
     }))
@@ -157,8 +204,8 @@ module.exports = class S3Plugin {
     return Promise.resolve(files)
   }
 
-  cdnizeHtml(file) {
-    return new Promise((resolve, reject) => {
+  cdnizeHtml(file: File) {
+    return new Promise<File>((resolve, reject) => {
       fs.readFile(file.path, (err, data) => {
         if (err) return reject(err)
 
@@ -171,15 +218,15 @@ module.exports = class S3Plugin {
     })
   }
 
-  changeUrls(files = []) {
+  changeUrls(files: File[] = []): Promise<File[]> {
     if (this.noCdnizer) return Promise.resolve(files)
 
-    var allHtml
+    let allHtml: File[]
 
     const {directory, htmlFiles = []} = this.options
 
     if (htmlFiles.length)
-      allHtml = this.addPathToFiles(htmlFiles, directory).concat(files)
+      allHtml = this.addPathToFiles(htmlFiles, directory as string).concat(files)
     else allHtml = files
 
     this.cdnizerOptions.files = allHtml.map(({name}) => `{/,}*${name}*`)
@@ -191,12 +238,12 @@ module.exports = class S3Plugin {
       .value()
 
     return Promise.all(
-      cdnizeFiles.map((file) => this.cdnizeHtml(file)).concat(otherFiles)
+      [...cdnizeFiles.map((file) => this.cdnizeHtml(file)), ...otherFiles]
     )
   }
 
-  filterAllowedFiles(files) {
-    return files.reduce((res, file) => {
+  filterAllowedFiles(files: File[]) {
+    return files.reduce<File[]>((res, file) => {
       if (
         this.isIncludeAndNotExclude(file.name) &&
         !this.isIgnoredFile(file.name)
@@ -207,14 +254,14 @@ module.exports = class S3Plugin {
     }, [])
   }
 
-  isIgnoredFile(file) {
+  isIgnoredFile(file: string) {
     return _.some(UPLOAD_IGNORES, (ignore) => new RegExp(ignore).test(file))
   }
 
-  isIncludeAndNotExclude(file) {
-    var isExclude,
-        isInclude,
-        {include, exclude} = this.options
+  isIncludeAndNotExclude(file: string) {
+    let isExclude: boolean,
+        isInclude: boolean
+    const {include, exclude} = this.options
 
     isInclude = include ? testRule(include, file) : true
     isExclude = exclude ? testRule(exclude, file) : false
@@ -225,18 +272,18 @@ module.exports = class S3Plugin {
   connect() {
     if (this.isConnected) return
 
-    this.client = new S3(this.clientConfig.s3Options)
+    this.client = new S3(this.s3Options)
     this.isConnected = true
   }
 
   transformBasePath() {
-    return Promise.resolve(this.basePathTransform(this.options.basePath))
+    return Promise.resolve<string>(this.basePathTransform(this.options.basePath))
       .then(addTrailingS3Sep)
-      .then((nPath) => (this.options.basePath = nPath))
+      .then((nPath) => {this.options.basePath = nPath})
   }
 
-  setupProgressBar(uploadFiles) {
-    const progressTotal = uploadFiles.reduce((acc, {upload}) => upload.totalBytes + acc, 0)
+  setupProgressBar(uploadFiles: S3.ManagedUpload[]) {
+    const progressTotal = uploadFiles.reduce((acc, upload) => upload.totalBytes + acc, 0)
 
     const progressBar = new ProgressBar('Uploading [:bar] :percent :etas', {
       complete: '>',
@@ -244,9 +291,9 @@ module.exports = class S3Plugin {
       total: progressTotal,
     })
 
-    var progressValue = 0
+    let progressValue = 0
 
-    uploadFiles.forEach(({upload}) => {
+    uploadFiles.forEach((upload) => {
       upload.on('httpUploadProgress', ({loaded}) => {
         progressValue += loaded
 
@@ -255,16 +302,17 @@ module.exports = class S3Plugin {
     })
   }
 
-  prioritizeFiles(files) {
+  prioritizeFiles(files: File[]) {
+    const {priority = []} = this.options
     const remainingFiles = [...files]
-    const prioritizedFiles = this.options.priority.map((reg) =>
-      _.remove(remainingFiles, (file) => reg.test(file.name))
+    const prioritizedFiles = priority.map((reg) =>
+      _.remove(remainingFiles, (file: File) => reg.test(file.name))
     )
 
     return [remainingFiles, ...prioritizedFiles]
   }
 
-  uploadPriorityChunk(priorityChunk) {
+  uploadPriorityChunk(priorityChunk: File[]) {
     const uploadFiles = priorityChunk.map((file) =>
       this.uploadFile(file.name, file.path)
     )
@@ -272,50 +320,51 @@ module.exports = class S3Plugin {
     return Promise.all(uploadFiles.map(({promise}) => promise))
   }
 
-  uploadInPriorityOrder(files) {
+  uploadInPriorityOrder(files: File[]) {
     const priorityChunks = this.prioritizeFiles(files)
     const uploadFunctions = priorityChunks.map((priorityChunk) => () =>
       this.uploadPriorityChunk(priorityChunk)
     )
 
-    return uploadFunctions.reduce(
-      (promise, uploadFn) => promise.then(uploadFn),
-      Promise.resolve()
-    )
+    return Promise.all(uploadFunctions.map(Promise.resolve))
   }
 
-  uploadFiles(files = []) {
+  uploadFiles(files: File[] = []): Promise<void> {
     return this.transformBasePath().then(() => {
       if (this.options.priority) {
-        return this.uploadInPriorityOrder(files)
+        this.uploadInPriorityOrder(files)
       } else {
         const uploadFiles = files.map((file) =>
           this.uploadFile(file.name, file.path)
         )
 
         if (this.options.progress) {
-          this.setupProgressBar(uploadFiles)
+          this.setupProgressBar(uploadFiles.map(({upload}) => upload))
         }
 
-        return Promise.all(uploadFiles.map(({promise}) => promise))
+        Promise.all(uploadFiles)
       }
     })
   }
 
-  uploadFile(fileName, file) {
+  uploadFile(fileName: string, file: string) {
     let Key = this.options.basePath + fileName
-    const s3Params = _.mapValues(this.uploadOptions, (optionConfig) => {
+    const s3Params: UploadOptions = _.mapValues(this.uploadOptions, (optionConfig) => {
       return _.isFunction(optionConfig) ? optionConfig(fileName, file) : optionConfig
     })
 
     // avoid noname folders in bucket
     if (Key[0] === '/') Key = Key.substr(1)
 
-    if (s3Params.ContentType === undefined)
-      s3Params.ContentType = mime.getType(fileName)
+    if (s3Params.ContentType === undefined) {
+      const contentType = mime.getType(fileName)
+
+      contentType && (s3Params.ContentType = contentType)
+    }
 
     const Body = fs.createReadStream(file)
-    const upload = this.client.upload(
+
+    const upload = this.client!.upload(
       _.merge({Key, Body}, DEFAULT_UPLOAD_OPTIONS, s3Params)
     )
 
@@ -325,21 +374,21 @@ module.exports = class S3Plugin {
   }
 
   invalidateCloudfront() {
-    const {clientConfig, cloudfrontInvalidateOptions} = this
+    const {s3Options, cloudfrontInvalidateOptions} = this
 
-    if (cloudfrontInvalidateOptions.DistributionId) {
+    if (cloudfrontInvalidateOptions?.DistributionId) {
       const {
         accessKeyId,
         secretAccessKey,
         sessionToken,
-      } = clientConfig.s3Options
+      } = s3Options
       const cloudfront = new CloudFront({
         accessKeyId,
         secretAccessKey,
         sessionToken,
       })
 
-      if (!_.isArray(cloudfrontInvalidateOptions.DistributionId))
+      if (!(cloudfrontInvalidateOptions.DistributionId instanceof Array))
         cloudfrontInvalidateOptions.DistributionId = [
           cloudfrontInvalidateOptions.DistributionId
         ]
@@ -369,3 +418,5 @@ module.exports = class S3Plugin {
     }
   }
 }
+
+export default S3Plugin
